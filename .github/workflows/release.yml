@@ -1,0 +1,41 @@
+name: Build and Release Burp Plugin
+
+on:
+  push:
+    tags:
+      - 'v*' # This workflow triggers when you push a tag starting with 'v'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven' # or 'maven' if using Maven
+
+      - name: Build with Maven
+#        run: ./gradlew build
+        # If using Maven:
+        run: mvn clean package
+
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          files: |
+            build/libs/*.jar  
+            # If using Maven:  
+            # target/*.jar
