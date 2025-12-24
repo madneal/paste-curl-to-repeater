@@ -7,8 +7,6 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
 
-import static burp.api.montoya.internal.ObjectFactoryLocator.FACTORY;
-
 import javax.swing.*;
 import java.awt.*;
 import java.awt.datatransfer.Clipboard;
@@ -45,7 +43,9 @@ public class MenuItemsProvider implements ContextMenuItemsProvider {
             HttpRequest rawRequest = parseCurlRequest(curlRequest);
 
             //open new HTTP request in repeater
-            api.repeater().sendToRepeater(rawRequest);
+            if (rawRequest != null) {
+                api.repeater().sendToRepeater(rawRequest);
+            }
         });
 
         menuItemList.add(pasteItem);
@@ -54,6 +54,11 @@ public class MenuItemsProvider implements ContextMenuItemsProvider {
 
     private HttpRequest parseCurlRequest(String curlCommand) {
         CurlParser.CurlRequest curlRequest = CurlParser.parseCurlCommand(curlCommand, api);
+        
+        if (curlRequest == null) {
+            api.logging().logToError("Failed to parse curl command");
+            return null;
+        }
 
         HttpService service = HttpService.httpService(curlRequest.getBaseUrl());
 

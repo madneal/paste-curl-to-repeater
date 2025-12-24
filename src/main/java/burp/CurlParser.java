@@ -40,53 +40,47 @@ public class CurlParser {
             requestMethod = methodMatcher.group(1);
         }
 
-        // Extract full URL
-        Pattern pattern = Pattern.compile("([\\s'\"]?)(https?://.*?)");
-        Matcher matcher = pattern.matcher(curlCommand);
-        if (matcher.find()) {
-            // Extract the delimiter
-            String delimiter = matcher.group(1);
-
-            // Check if the URL ends with the same delimiter
-            if (delimiter != null && !delimiter.isEmpty()) {
-                log("delimiter: |" + delimiter + "|", api);
-                // Start looking after the delimiter
-                int startIdx = matcher.end(1); // Skip the delimiter
-                log("start: " + startIdx, api);
-                int endIdx = startIdx;
-
-                // Find the position where the URL ends
-                for (int i = endIdx; i < curlCommand.length(); i++) {
-                    if (curlCommand.charAt(i) == delimiter.charAt(0)) {
-                        //endIdx = i;
-                        break;
-                    }
-                    endIdx++;
+        // Extract full URL - handle both quoted and unquoted URLs
+        String extractedUrl = null;
+        
+        // Try to find quoted URL first (single or double quotes)
+        Pattern quotedUrlPattern = Pattern.compile("['\"](https?://[^'\"]+)['\"]");
+        Matcher quotedMatcher = quotedUrlPattern.matcher(curlCommand);
+        if (quotedMatcher.find()) {
+            extractedUrl = quotedMatcher.group(1);
+        } else {
+            // If no quoted URL, find unquoted URL (stop at whitespace or end of string)
+            Pattern unquotedUrlPattern = Pattern.compile("(https?://[^\\s'\"]+)");
+            Matcher unquotedMatcher = unquotedUrlPattern.matcher(curlCommand);
+            if (unquotedMatcher.find()) {
+                extractedUrl = unquotedMatcher.group(1);
+            }
+        }
+        
+        if (extractedUrl != null) {
+            log("url: " + extractedUrl, api);
+            try {
+                URL url = new URL(extractedUrl);
+                protocol = url.getProtocol();
+                host = url.getHost();
+                path = url.getPath();
+                query = url.getQuery();
+                port = url.getPort();
+            } catch (java.net.MalformedURLException mue) {
+                if (api != null) {
+                    api.logging().logToError("Failed to parse URL: " + extractedUrl);
+                    api.logging().logToError(mue);
                 }
-
-                log("end: " + endIdx, api);
-                String extractedUrl = curlCommand.substring(startIdx, endIdx);
-                log("url: " + extractedUrl, api);
-
-                try {
-                    URL url = new URL(extractedUrl);
-
-                    protocol = url.getProtocol();
-                    host = url.getHost();
-                    path = url.getPath();
-                    query = url.getQuery();
-                    port = url.getPort();
-                } catch (java.net.MalformedURLException mue) {
-                    if (api != null) api.logging().logToError(mue);
-
-                    return null;
-                }
+                return null;
             }
         } else {
+            if (api != null) {
+                api.logging().logToError("No valid URL found in curl command");
+            }
             return null;
         }
 
-        // Extract headers
+        // Extract headers - prevent duplicates
         Pattern headerPattern = Pattern.compile("(?:--header|-H|-b)\\s+['\"]?([^'\"]+)['\"]?");
         Matcher headerMatcher = headerPattern.matcher(curlCommand);
         while (headerMatcher.find()) {
@@ -96,8 +90,19 @@ public class CurlParser {
                 String name = header.substring(0, colonIndex).trim();
                 String value = header.substring(colonIndex + 1).trim();
 
-                HttpHeader httpHeader = new HttpHeaderImpl(name, value);
-                headers.add(httpHeader);
+                // Check if header with same name already exists (case-insensitive)
+                boolean headerExists = false;
+                for (HttpHeader existingHeader : headers) {
+                    if (existingHeader.name().equalsIgnoreCase(name)) {
+                        headerExists = true;
+                        break;
+                    }
+                }
+                
+                if (!headerExists) {
+                    HttpHeader httpHeader = new HttpHeaderImpl(name, value);
+                    headers.add(httpHeader);
+                }
             }
         }
 
