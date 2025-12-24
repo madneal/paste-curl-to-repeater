@@ -37,7 +37,11 @@ public class CurlParser {
         Pattern methodPattern = Pattern.compile("(?:--request|-X)\\s+(?:\\$'([^']+)'|['\"]?([A-Z]+)['\"]?)");
         Matcher methodMatcher = methodPattern.matcher(curlCommand);
         if (methodMatcher.find()) {
-            requestMethod = methodMatcher.group(1) != null ? methodMatcher.group(1) : methodMatcher.group(2);
+            if (methodMatcher.group(1) != null) {
+                requestMethod = unescapeDollarQuote(methodMatcher.group(1));
+            } else {
+                requestMethod = methodMatcher.group(2);
+            }
         }
 
         // Extract full URL - handle $'...', quoted, and unquoted URLs
@@ -47,7 +51,7 @@ public class CurlParser {
         Pattern dollarQuoteUrlPattern = Pattern.compile("\\$'(https?://[^']+)'");
         Matcher dollarQuoteMatcher = dollarQuoteUrlPattern.matcher(curlCommand);
         if (dollarQuoteMatcher.find()) {
-            extractedUrl = dollarQuoteMatcher.group(1);
+            extractedUrl = unescapeDollarQuote(dollarQuoteMatcher.group(1));
         } else {
             // Try to find quoted URL (single or double quotes)
             Pattern quotedUrlPattern = Pattern.compile("['\"](https?://[^'\"]+)['\"]");
@@ -91,7 +95,12 @@ public class CurlParser {
         Pattern headerPattern = Pattern.compile("(?:--header|-H|-b)\\s+(?:\\$'([^']+)'|['\"]?([^'\"]+)['\"]?)");
         Matcher headerMatcher = headerPattern.matcher(curlCommand);
         while (headerMatcher.find()) {
-            String header = headerMatcher.group(1) != null ? headerMatcher.group(1) : headerMatcher.group(2);
+            String header = null;
+            if (headerMatcher.group(1) != null) {
+                header = unescapeDollarQuote(headerMatcher.group(1));
+            } else {
+                header = headerMatcher.group(2);
+            }
             if (header == null) continue;
             
             int colonIndex = header.indexOf(':');
@@ -120,7 +129,7 @@ public class CurlParser {
         Pattern dollarQuoteBodyPattern = Pattern.compile("(?:--data-binary|--data-raw|-d)\\s+\\$'([^']+)'");
         Matcher dollarQuoteBodyMatcher = dollarQuoteBodyPattern.matcher(curlCommand);
         if (dollarQuoteBodyMatcher.find()) {
-            body = dollarQuoteBodyMatcher.group(1);
+            body = unescapeDollarQuote(dollarQuoteBodyMatcher.group(1));
             // If -X option is not specified and data option is present, assume it's a POST request
             if (requestMethod == null || "GET".equals(requestMethod)) {
                 requestMethod = "POST";
@@ -148,6 +157,98 @@ public class CurlParser {
         } else {
             return null;
         }
+    }
+
+    /**
+     * Unescape ANSI-C quoted string ($'...' syntax)
+     * Handles escape sequences like: \", \\, \', \n, \r, \t, \xHH, etc.
+     */
+    private static String unescapeDollarQuote(String str) {
+        if (str == null) return null;
+        
+        StringBuilder result = new StringBuilder();
+        int i = 0;
+        while (i < str.length()) {
+            if (str.charAt(i) == '\\' && i + 1 < str.length()) {
+                char next = str.charAt(i + 1);
+                switch (next) {
+                    case '"':
+                        result.append('"');
+                        i += 2;
+                        break;
+                    case '\\':
+                        result.append('\\');
+                        i += 2;
+                        break;
+                    case '\'':
+                        result.append('\'');
+                        i += 2;
+                        break;
+                    case 'n':
+                        result.append('\n');
+                        i += 2;
+                        break;
+                    case 'r':
+                        result.append('\r');
+                        i += 2;
+                        break;
+                    case 't':
+                        result.append('\t');
+                        i += 2;
+                        break;
+                    case 'x':
+                        // Handle \xHH (hexadecimal)
+                        if (i + 3 < str.length()) {
+                            try {
+                                String hex = str.substring(i + 2, i + 4);
+                                int value = Integer.parseInt(hex, 16);
+                                result.append((char) value);
+                                i += 4;
+                            } catch (NumberFormatException e) {
+                                // Invalid hex, treat as literal
+                                result.append('\\');
+                                result.append(next);
+                                i += 2;
+                            }
+                        } else {
+                            result.append('\\');
+                            result.append(next);
+                            i += 2;
+                        }
+                        break;
+                    case 'u':
+                        // Handle Unicode escape sequences (4 hex digits)
+                        if (i + 5 < str.length()) {
+                            try {
+                                String hex = str.substring(i + 2, i + 6);
+                                int value = Integer.parseInt(hex, 16);
+                                result.append((char) value);
+                                i += 6;
+                            } catch (NumberFormatException e) {
+                                // Invalid hex, treat as literal
+                                result.append('\\');
+                                result.append(next);
+                                i += 2;
+                            }
+                        } else {
+                            result.append('\\');
+                            result.append(next);
+                            i += 2;
+                        }
+                        break;
+                    default:
+                        // Unknown escape sequence, keep as is
+                        result.append('\\');
+                        result.append(next);
+                        i += 2;
+                        break;
+                }
+            } else {
+                result.append(str.charAt(i));
+                i++;
+            }
+        }
+        return result.toString();
     }
 
     protected static void log(String toLog, MontoyaApi api) {
