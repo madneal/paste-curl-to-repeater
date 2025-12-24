@@ -26,6 +26,9 @@ jobs:
         run: mvn clean package -DskipTests 
         # 如果需要跳过测试，可以加上 -DskipTests
 
+      - name: Clean up original JAR
+        run: rm -f target/original*.jar || true
+
       - name: Extract version from tag
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
