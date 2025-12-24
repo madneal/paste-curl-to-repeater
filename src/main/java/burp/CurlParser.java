@@ -33,27 +33,34 @@ public class CurlParser {
         List<HttpHeader> headers = new ArrayList<>();
         String body = "";
 
-        // Extract request method
-        Pattern methodPattern = Pattern.compile("(?:--request|-X)\\s+([A-Z]+)");
+        // Extract request method - handle $'...' syntax
+        Pattern methodPattern = Pattern.compile("(?:--request|-X)\\s+(?:\\$'([^']+)'|['\"]?([A-Z]+)['\"]?)");
         Matcher methodMatcher = methodPattern.matcher(curlCommand);
         if (methodMatcher.find()) {
-            requestMethod = methodMatcher.group(1);
+            requestMethod = methodMatcher.group(1) != null ? methodMatcher.group(1) : methodMatcher.group(2);
         }
 
-        // Extract full URL - handle both quoted and unquoted URLs
+        // Extract full URL - handle $'...', quoted, and unquoted URLs
         String extractedUrl = null;
         
-        // Try to find quoted URL first (single or double quotes)
-        Pattern quotedUrlPattern = Pattern.compile("['\"](https?://[^'\"]+)['\"]");
-        Matcher quotedMatcher = quotedUrlPattern.matcher(curlCommand);
-        if (quotedMatcher.find()) {
-            extractedUrl = quotedMatcher.group(1);
+        // Try to find $'...' URL first
+        Pattern dollarQuoteUrlPattern = Pattern.compile("\\$'(https?://[^']+)'");
+        Matcher dollarQuoteMatcher = dollarQuoteUrlPattern.matcher(curlCommand);
+        if (dollarQuoteMatcher.find()) {
+            extractedUrl = dollarQuoteMatcher.group(1);
         } else {
-            // If no quoted URL, find unquoted URL (stop at whitespace or end of string)
-            Pattern unquotedUrlPattern = Pattern.compile("(https?://[^\\s'\"]+)");
-            Matcher unquotedMatcher = unquotedUrlPattern.matcher(curlCommand);
-            if (unquotedMatcher.find()) {
-                extractedUrl = unquotedMatcher.group(1);
+            // Try to find quoted URL (single or double quotes)
+            Pattern quotedUrlPattern = Pattern.compile("['\"](https?://[^'\"]+)['\"]");
+            Matcher quotedMatcher = quotedUrlPattern.matcher(curlCommand);
+            if (quotedMatcher.find()) {
+                extractedUrl = quotedMatcher.group(1);
+            } else {
+                // If no quoted URL, find unquoted URL (stop at whitespace or end of string)
+                Pattern unquotedUrlPattern = Pattern.compile("(https?://[^\\s'\"]+)");
+                Matcher unquotedMatcher = unquotedUrlPattern.matcher(curlCommand);
+                if (unquotedMatcher.find()) {
+                    extractedUrl = unquotedMatcher.group(1);
+                }
             }
         }
         
@@ -80,11 +87,13 @@ public class CurlParser {
             return null;
         }
 
-        // Extract headers - prevent duplicates
-        Pattern headerPattern = Pattern.compile("(?:--header|-H|-b)\\s+['\"]?([^'\"]+)['\"]?");
+        // Extract headers - prevent duplicates, handle $'...' syntax
+        Pattern headerPattern = Pattern.compile("(?:--header|-H|-b)\\s+(?:\\$'([^']+)'|['\"]?([^'\"]+)['\"]?)");
         Matcher headerMatcher = headerPattern.matcher(curlCommand);
         while (headerMatcher.find()) {
-            String header = headerMatcher.group(1);
+            String header = headerMatcher.group(1) != null ? headerMatcher.group(1) : headerMatcher.group(2);
+            if (header == null) continue;
+            
             int colonIndex = header.indexOf(':');
             if (colonIndex != -1) {
                 String name = header.substring(0, colonIndex).trim();
@@ -106,15 +115,26 @@ public class CurlParser {
             }
         }
 
-        // Extract request body
-        Pattern bodyPattern = Pattern.compile("(?:--data-raw|-d)\\s+(['\"])(.*?)(\\1)", Pattern.DOTALL);
-        Matcher bodyMatcher = bodyPattern.matcher(curlCommand);
-
-        if (bodyMatcher.find()) {
-            body = bodyMatcher.group(2);
-            // If -X option is not specified and --data-raw is present, assume it's a POST request
+        // Extract request body - handle --data-binary, --data-raw, -d, and $'...' syntax
+        // Try $'...' syntax first
+        Pattern dollarQuoteBodyPattern = Pattern.compile("(?:--data-binary|--data-raw|-d)\\s+\\$'([^']+)'");
+        Matcher dollarQuoteBodyMatcher = dollarQuoteBodyPattern.matcher(curlCommand);
+        if (dollarQuoteBodyMatcher.find()) {
+            body = dollarQuoteBodyMatcher.group(1);
+            // If -X option is not specified and data option is present, assume it's a POST request
             if (requestMethod == null || "GET".equals(requestMethod)) {
                 requestMethod = "POST";
+            }
+        } else {
+            // Try regular quoted syntax
+            Pattern bodyPattern = Pattern.compile("(?:--data-binary|--data-raw|-d)\\s+(['\"])(.*?)(\\1)", Pattern.DOTALL);
+            Matcher bodyMatcher = bodyPattern.matcher(curlCommand);
+            if (bodyMatcher.find()) {
+                body = bodyMatcher.group(2);
+                // If -X option is not specified and data option is present, assume it's a POST request
+                if (requestMethod == null || "GET".equals(requestMethod)) {
+                    requestMethod = "POST";
+                }
             }
         }
 
