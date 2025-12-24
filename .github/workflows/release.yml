@@ -3,7 +3,10 @@ name: Build and Release Burp Plugin
 on:
   push:
     tags:
-      - 'v*' # This workflow triggers when you push a tag starting with 'v'
+      - 'v*'
+
+permissions:
+  contents: write # 确保有权限上传 Release
 
 jobs:
   build:
@@ -15,14 +18,13 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
-          java-version: '21'
+          java-version: '21' # 确认 Java 版本是否合适
           distribution: 'temurin'
-          cache: 'maven' # or 'maven' if using Maven
+          cache: 'maven'
 
       - name: Build with Maven
-#        run: ./gradlew build
-        # If using Maven:
-        run: mvn clean package
+        run: mvn clean package -DskipTests 
+        # 如果需要跳过测试，可以加上 -DskipTests
 
       - name: Extract version from tag
         id: get_version
@@ -30,12 +32,11 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ steps.get_version.outputs.VERSION }}
           draft: false
           prerelease: false
-          files: |
-            build/libs/*.jar  
-            # If using Maven:  
-            # target/*.jar
+          files: target/*.jar # 修改为正确的 Jar 路径
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 添加 GitHub token
