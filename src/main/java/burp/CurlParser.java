@@ -24,6 +24,8 @@ public class CurlParser {
 
         log("CurlParser.parseCurlCommand(): " + curlCommand, api);
 
+        curlCommand = preprocessCookieFlags(curlCommand);
+
         String requestMethod = "GET";
         String protocol = null;
         String host = null;
@@ -92,7 +94,7 @@ public class CurlParser {
         }
 
         // Extract headers - prevent duplicates, handle $'...' syntax
-        Pattern headerPattern = Pattern.compile("(?:--header|-H|-b)\\s+(?:\\$'([^']+)'|['\"]?([^'\"]+)['\"]?)");
+        Pattern headerPattern = Pattern.compile("(?:--header|-H)\\s+(?:\\$'([^']+)'|['\"]?([^'\"]+)['\"]?)");
         Matcher headerMatcher = headerPattern.matcher(curlCommand);
         while (headerMatcher.find()) {
             String header = null;
@@ -249,6 +251,22 @@ public class CurlParser {
             }
         }
         return result.toString();
+    }
+
+    private static String preprocessCookieFlags(String curlCommand) {
+        Pattern dollarPattern = Pattern.compile("-b\\s+\\$'([^']+)'");
+        Matcher dollarMatcher = dollarPattern.matcher(curlCommand);
+        StringBuffer sb = new StringBuffer();
+        while (dollarMatcher.find()) {
+            String cookieValue = unescapeDollarQuote(dollarMatcher.group(1));
+            dollarMatcher.appendReplacement(sb, "-H 'Cookie: " + cookieValue.replace("'", "\\'") + "'");
+        }
+        dollarMatcher.appendTail(sb);
+        curlCommand = sb.toString();
+        
+        curlCommand = curlCommand.replaceAll("(?s)-b\\s+'(.*?)'", "-H 'Cookie: $1'");
+        curlCommand = curlCommand.replaceAll("(?s)-b\\s+\"(.*?)\"", "-H \"Cookie: $1\"");
+        return curlCommand;
     }
 
     protected static void log(String toLog, MontoyaApi api) {
