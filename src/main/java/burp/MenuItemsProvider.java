@@ -67,12 +67,26 @@ public class MenuItemsProvider implements ContextMenuItemsProvider {
                 .withBody(curlRequest.getBody());
 
         for (HttpHeader header : curlRequest.getHeaders()) {
+            output = withoutHeadersNamedIgnoreCase(output, header.name());
             output = output.withHeader(header.name(), header.value());
         }
 
         output = output.withService(service);
 
         return output;
+    }
+
+    private static HttpRequest withoutHeadersNamedIgnoreCase(HttpRequest request, String headerName) {
+        List<HttpHeader> toRemove = new ArrayList<>();
+        for (HttpHeader h : request.headers()) {
+            if (h.name().equalsIgnoreCase(headerName)) {
+                toRemove.add(h);
+            }
+        }
+        for (HttpHeader h : toRemove) {
+            request = request.withRemovedHeader(h);
+        }
+        return request;
     }
 
     public String getClipboardContent() {
