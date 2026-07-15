@@ -17,6 +17,7 @@ import java.awt.event.ActionEvent;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+
 public class MenuItemsProvider implements ContextMenuItemsProvider {
 
     private MontoyaApi api;
@@ -35,16 +36,22 @@ public class MenuItemsProvider implements ContextMenuItemsProvider {
 
         JMenuItem pasteItem = new JMenuItem("Paste cURL command");
         pasteItem.addActionListener((ActionEvent e) -> {
-            //get cURL request from clipboard
             String curlRequest = getClipboardContent();
-            api.logging().logToOutput("Parsing: " + curlRequest);
+            if (curlRequest == null || curlRequest.isBlank()) {
+                showError("Clipboard is empty or does not contain text.");
+                return;
+            }
 
-            //parse cURL into raw HTTP request
+            api.logging().logToOutput("Paste cURL: parsing clipboard content (" + curlRequest.length() + " chars)");
+
             HttpRequest rawRequest = parseCurlRequest(curlRequest);
 
-            //open new HTTP request in repeater
             if (rawRequest != null) {
                 api.repeater().sendToRepeater(rawRequest);
+                api.logging().logToOutput("Paste cURL: sent request to Repeater");
+            } else {
+                showError("Failed to parse cURL command from clipboard.\n\n"
+                        + "Ensure the clipboard contains a valid curl command with an http(s) URL.");
             }
         });
 
@@ -52,9 +59,19 @@ public class MenuItemsProvider implements ContextMenuItemsProvider {
         return menuItemList;
     }
 
+    private void showError(String message) {
+        api.logging().logToError(message);
+        SwingUtilities.invokeLater(() ->
+                JOptionPane.showMessageDialog(
+                        null,
+                        message,
+                        "Paste cURL",
+                        JOptionPane.ERROR_MESSAGE));
+    }
+
     private HttpRequest parseCurlRequest(String curlCommand) {
         CurlParser.CurlRequest curlRequest = CurlParser.parseCurlCommand(curlCommand, api);
-        
+
         if (curlRequest == null) {
             api.logging().logToError("Failed to parse curl command");
             return null;

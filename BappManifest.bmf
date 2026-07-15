@@ -9,5 +9,5 @@ ProOnly: False
 Author: August Detlefsen
 ShortDescription: Allow pasting cURL commands as raw HTTP requests in a new tab in Repeater.
 EntryPoint: target/burp-suite-paste-curl-1.0-SNAPSHOT.jar
-BuildCommand: mvn package -DskipTests=true -Dmaven.javadoc.skip=true -B
+BuildCommand: mvn package -Dmaven.javadoc.skip=true -B
 SupportedProducts: Pro, Community
