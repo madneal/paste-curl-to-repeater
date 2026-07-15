@@ -23,8 +23,7 @@ jobs:
           cache: 'maven'
 
       - name: Build with Maven
-        run: mvn clean package -DskipTests 
-        # 如果需要跳过测试，可以加上 -DskipTests
+        run: mvn clean package
 
       - name: Clean up original JAR
         run: rm -f target/original*.jar || true

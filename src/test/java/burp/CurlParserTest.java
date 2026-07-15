@@ -288,4 +288,154 @@ class CurlParserTest {
 
         assertEquals("https://api.company.com/v1/api?parameter=value&api_key=123456789", request.getBaseUrl());
     }
+
+    @Test
+    public void parseDataLongForm() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com/a' --data '{\"a\":1}'");
+
+        assertNotNull(request);
+        assertEquals("POST", request.getMethod());
+        assertEquals("{\"a\":1}", request.getBody());
+    }
+
+    @Test
+    public void parseUnquotedData() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl https://example.com/a -d foo=bar");
+
+        assertNotNull(request);
+        assertEquals("POST", request.getMethod());
+        assertEquals("foo=bar", request.getBody());
+    }
+
+    @Test
+    public void parseEscapedDoubleQuotedJsonBody() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' -H 'Content-Type: application/json' --data-raw \"{\\\"key\\\": \\\"value\\\"}\"");
+
+        assertNotNull(request);
+        assertEquals("POST", request.getMethod());
+        assertEquals("{\"key\": \"value\"}", request.getBody());
+    }
+
+    @Test
+    public void parseCookieWithDollarSigns() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' -b $'token=$1$abc'");
+
+        assertNotNull(request);
+        assertEquals(1, request.getHeaders().size());
+        assertEquals("Cookie", request.getHeaders().get(0).name());
+        assertEquals("token=$1$abc", request.getHeaders().get(0).value());
+    }
+
+    @Test
+    public void parseCookieLongForm() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' --cookie 'a=1'");
+
+        assertNotNull(request);
+        assertTrue(request.getHeaders().stream()
+                .anyMatch(h -> h.name().equalsIgnoreCase("Cookie") && h.value().equals("a=1")));
+    }
+
+    @Test
+    public void parseUnquotedCookie() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' -b session=abc");
+
+        assertNotNull(request);
+        assertTrue(request.getHeaders().stream()
+                .anyMatch(h -> h.name().equalsIgnoreCase("Cookie") && h.value().equals("session=abc")));
+    }
+
+    @Test
+    public void parseLowercaseMethod() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl -X delete 'https://example.com/a'");
+
+        assertNotNull(request);
+        assertEquals("DELETE", request.getMethod());
+    }
+
+    @Test
+    public void parseUrlAfterHeaderContainingUrl() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl -H Referer:https://referrer.example/page https://api.example.com/real");
+
+        assertNotNull(request);
+        assertEquals("api.example.com", request.getHost());
+        assertEquals("/real", request.getPath());
+    }
+
+    @Test
+    public void parseUrlLastWithOriginHeader() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl -X POST \\\n  -H 'Origin: https://app.example.com' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"x\":1}' \\\n  'https://api.example.com/v1'");
+
+        assertNotNull(request);
+        assertEquals("api.example.com", request.getHost());
+        assertEquals("POST", request.getMethod());
+        assertEquals("{\"x\":1}", request.getBody());
+    }
+
+    @Test
+    public void parseMultipleDataFlags() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' -d 'a=1' -d 'b=2'");
+
+        assertNotNull(request);
+        assertEquals("a=1&b=2", request.getBody());
+        assertEquals("POST", request.getMethod());
+    }
+
+    @Test
+    public void parseBasicAuthUserFlag() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' -u user:pass");
+
+        assertNotNull(request);
+        assertTrue(request.getHeaders().stream()
+                .anyMatch(h -> h.name().equalsIgnoreCase("Authorization")
+                        && h.value().startsWith("Basic ")));
+    }
+
+    @Test
+    public void parseUserInfoInUrl() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://user:pass@example.com/secret'");
+
+        assertNotNull(request);
+        assertEquals("example.com", request.getHost());
+        assertEquals("https://example.com/secret", request.getBaseUrl());
+        assertTrue(request.getHeaders().stream()
+                .anyMatch(h -> h.name().equalsIgnoreCase("Authorization")
+                        && h.value().startsWith("Basic ")));
+    }
+
+    @Test
+    public void parseExplicitGetWithBodyKeepsGet() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl -X GET 'https://example.com/a' -d 'x'");
+
+        assertNotNull(request);
+        assertEquals("GET", request.getMethod());
+        assertEquals("x", request.getBody());
+    }
+
+    @Test
+    public void parseDollarQuoteBody() {
+        CurlParser.CurlRequest request = CurlParser.parseCurlCommand(
+                "curl 'https://example.com' --data-raw $'{\"a\":\"b\"}'");
+
+        assertNotNull(request);
+        assertEquals("POST", request.getMethod());
+        assertEquals("{\"a\":\"b\"}", request.getBody());
+    }
+
+    @Test
+    public void parseGarbageReturnsNull() {
+        assertNull(CurlParser.parseCurlCommand("not a curl command at all"));
+    }
 }

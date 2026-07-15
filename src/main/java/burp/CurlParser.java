@@ -4,29 +4,49 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.HttpHeader;
 
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Parses cURL request into strings.
- * 
+ *
  * @author August Detlefsen
  */
 public class CurlParser {
+
+    private static final Pattern METHOD_PATTERN = Pattern.compile(
+            "(?:--request|-X)\\s+(?:\\$'([^']+)'|['\"]([^'\"]+)['\"]|([A-Za-z]+))");
+
+    private static final Pattern DATA_FLAG_PATTERN = Pattern.compile(
+            "(?:--data-binary|--data-raw|--data-ascii|--data-urlencode|--data|-d)(?:\\s+|=)");
+
+    private static final Pattern USER_PATTERN = Pattern.compile(
+            "(?:--user|-u)\\s+(?:\\$'([^']+)'|['\"]([^'\"]+)['\"]|(\\S+))");
+
+    private static final Pattern HEADER_PATTERN = Pattern.compile(
+            "(?:--header|-H)\\s+(?:\\$'([^']+)'|['\"]([^'\"]+)['\"])");
+
+    private static final Pattern COOKIE_FLAG_PATTERN = Pattern.compile(
+            "(?:--cookie|-b)(?:\\s+|=)");
 
     public static CurlRequest parseCurlCommand(String curlCommand) {
         return parseCurlCommand(curlCommand, null);
     }
 
     public static CurlRequest parseCurlCommand(String curlCommand, MontoyaApi api) {
+        if (curlCommand == null || curlCommand.isBlank()) {
+            return null;
+        }
 
-        log("CurlParser.parseCurlCommand(): " + curlCommand, api);
-
-        curlCommand = preprocessCookieFlags(curlCommand);
+        log("CurlParser.parseCurlCommand(): " + summarizeForLog(curlCommand), api);
 
         String requestMethod = "GET";
+        boolean methodExplicit = false;
         String protocol = null;
         String host = null;
         String path = null;
@@ -34,42 +54,24 @@ public class CurlParser {
         String query = null;
         List<HttpHeader> headers = new ArrayList<>();
         String body = "";
+        String userInfo = null;
 
-        // Extract request method - handle $'...' syntax
-        Pattern methodPattern = Pattern.compile("(?:--request|-X)\\s+(?:\\$'([^']+)'|['\"]?([A-Z]+)['\"]?)");
-        Matcher methodMatcher = methodPattern.matcher(curlCommand);
+        // Extract request method (case-insensitive)
+        Matcher methodMatcher = METHOD_PATTERN.matcher(curlCommand);
         if (methodMatcher.find()) {
-            if (methodMatcher.group(1) != null) {
-                requestMethod = unescapeDollarQuote(methodMatcher.group(1));
-            } else {
-                requestMethod = methodMatcher.group(2);
+            String rawMethod = firstNonNull(methodMatcher.group(1), methodMatcher.group(2), methodMatcher.group(3));
+            if (rawMethod != null) {
+                if (methodMatcher.group(1) != null) {
+                    rawMethod = unescapeDollarQuote(rawMethod);
+                }
+                requestMethod = rawMethod.trim().toUpperCase(Locale.ROOT);
+                methodExplicit = true;
             }
         }
 
-        // Extract full URL - handle $'...', quoted, and unquoted URLs
-        String extractedUrl = null;
-        
-        // Try to find $'...' URL first
-        Pattern dollarQuoteUrlPattern = Pattern.compile("\\$'(https?://[^']+)'");
-        Matcher dollarQuoteMatcher = dollarQuoteUrlPattern.matcher(curlCommand);
-        if (dollarQuoteMatcher.find()) {
-            extractedUrl = unescapeDollarQuote(dollarQuoteMatcher.group(1));
-        } else {
-            // Try to find quoted URL (single or double quotes)
-            Pattern quotedUrlPattern = Pattern.compile("['\"](https?://[^'\"]+)['\"]");
-            Matcher quotedMatcher = quotedUrlPattern.matcher(curlCommand);
-            if (quotedMatcher.find()) {
-                extractedUrl = quotedMatcher.group(1);
-            } else {
-                // If no quoted URL, find unquoted URL (stop at whitespace or end of string)
-                Pattern unquotedUrlPattern = Pattern.compile("(https?://[^\\s'\"]+)");
-                Matcher unquotedMatcher = unquotedUrlPattern.matcher(curlCommand);
-                if (unquotedMatcher.find()) {
-                    extractedUrl = unquotedMatcher.group(1);
-                }
-            }
-        }
-        
+        // Extract full URL - ignore URLs embedded in headers/cookies/data
+        String extractedUrl = extractUrl(curlCommand);
+
         if (extractedUrl != null) {
             log("url: " + extractedUrl, api);
             try {
@@ -79,6 +81,7 @@ public class CurlParser {
                 path = url.getPath();
                 query = url.getQuery();
                 port = url.getPort();
+                userInfo = url.getUserInfo();
             } catch (java.net.MalformedURLException mue) {
                 if (api != null) {
                     api.logging().logToError("Failed to parse URL: " + extractedUrl);
@@ -93,72 +96,301 @@ public class CurlParser {
             return null;
         }
 
-        // Extract headers - prevent duplicates, handle $'...' syntax
-        Pattern headerPattern = Pattern.compile("(?:--header|-H)\\s+(?:\\$'([^']+)'|['\"]?([^'\"]+)['\"]?)");
-        Matcher headerMatcher = headerPattern.matcher(curlCommand);
+        // Extract headers
+        Matcher headerMatcher = HEADER_PATTERN.matcher(curlCommand);
         while (headerMatcher.find()) {
-            String header = null;
+            String header;
             if (headerMatcher.group(1) != null) {
                 header = unescapeDollarQuote(headerMatcher.group(1));
             } else {
                 header = headerMatcher.group(2);
             }
-            if (header == null) continue;
-            
-            int colonIndex = header.indexOf(':');
-            if (colonIndex != -1) {
-                String name = header.substring(0, colonIndex).trim();
-                String value = header.substring(colonIndex + 1).trim();
+            if (header == null) {
+                continue;
+            }
+            addHeaderIfAbsent(headers, header);
+        }
 
-                // Check if header with same name already exists (case-insensitive)
-                boolean headerExists = false;
-                for (HttpHeader existingHeader : headers) {
-                    if (existingHeader.name().equalsIgnoreCase(name)) {
-                        headerExists = true;
-                        break;
-                    }
-                }
-                
-                if (!headerExists) {
-                    HttpHeader httpHeader = new HttpHeaderImpl(name, value);
-                    headers.add(httpHeader);
-                }
+        // Cookies via -b / --cookie
+        for (String cookieValue : extractFlagValues(curlCommand, COOKIE_FLAG_PATTERN)) {
+            if (cookieValue != null && !cookieValue.isEmpty() && !cookieValue.startsWith("@")) {
+                addHeaderIfAbsent(headers, "Cookie: " + cookieValue);
             }
         }
 
-        // Extract request body - handle --data-binary, --data-raw, -d, and $'...' syntax
-        // Try $'...' syntax first
-        Pattern dollarQuoteBodyPattern = Pattern.compile("(?:--data-binary|--data-raw|-d)\\s+\\$'([^']+)'");
-        Matcher dollarQuoteBodyMatcher = dollarQuoteBodyPattern.matcher(curlCommand);
-        if (dollarQuoteBodyMatcher.find()) {
-            body = unescapeDollarQuote(dollarQuoteBodyMatcher.group(1));
-            // If -X option is not specified and data option is present, assume it's a POST request
-            if (requestMethod == null || "GET".equals(requestMethod)) {
+        // Basic auth via -u / --user
+        Matcher userMatcher = USER_PATTERN.matcher(curlCommand);
+        if (userMatcher.find()) {
+            String userPass = firstNonNull(userMatcher.group(1), userMatcher.group(2), userMatcher.group(3));
+            if (userMatcher.group(1) != null) {
+                userPass = unescapeDollarQuote(userPass);
+            }
+            if (userPass != null && !userPass.isEmpty()) {
+                addBasicAuthIfAbsent(headers, userPass);
+            }
+        } else if (userInfo != null && !userInfo.isEmpty()) {
+            addBasicAuthIfAbsent(headers, userInfo);
+        }
+
+        // Extract request body (supports multiple -d / --data* flags)
+        List<String> dataParts = extractFlagValues(curlCommand, DATA_FLAG_PATTERN);
+        if (!dataParts.isEmpty()) {
+            body = String.join("&", dataParts);
+            if (!methodExplicit) {
                 requestMethod = "POST";
             }
-        } else {
-            // Try regular quoted syntax
-            Pattern bodyPattern = Pattern.compile("(?:--data-binary|--data-raw|-d)\\s+(['\"])(.*?)(\\1)", Pattern.DOTALL);
-            Matcher bodyMatcher = bodyPattern.matcher(curlCommand);
-            if (bodyMatcher.find()) {
-                body = bodyMatcher.group(2);
-                // If -X option is not specified and data option is present, assume it's a POST request
-                if (requestMethod == null || "GET".equals(requestMethod)) {
-                    requestMethod = "POST";
-                }
-            }
         }
 
-        if (api != null) {
-            log("CurlParser.parseCurlCommand() complete: host: " + host + " path: " + path, api);
-            log("Body: " + body, api);
-        }
+        log("CurlParser.parseCurlCommand() complete: host: " + host + " path: " + path, api);
 
         if (host != null && path != null) {
             return new CurlRequest(requestMethod, protocol, host, path, query, port, headers, body);
-        } else {
+        }
+        return null;
+    }
+
+    /**
+     * Extract the request URL, ignoring URLs that appear inside header/cookie/data values.
+     */
+    static String extractUrl(String curlCommand) {
+        // Prefer explicit --url
+        Pattern urlFlagPattern = Pattern.compile(
+                "--url\\s+(?:\\$'(https?://[^']+)'|['\"](https?://[^'\"]+)['\"]|(https?://\\S+))");
+        Matcher urlFlagMatcher = urlFlagPattern.matcher(curlCommand);
+        if (urlFlagMatcher.find()) {
+            String url = firstNonNull(urlFlagMatcher.group(1), urlFlagMatcher.group(2), urlFlagMatcher.group(3));
+            if (urlFlagMatcher.group(1) != null) {
+                return unescapeDollarQuote(url);
+            }
+            return stripTrailingCurlMeta(url);
+        }
+
+        // Mask regions that commonly embed URLs so they are not picked as the target
+        String searchable = maskEmbeddedUrlRegions(curlCommand);
+
+        Pattern dollarQuoteUrlPattern = Pattern.compile("\\$'(https?://[^']+)'");
+        Matcher dollarQuoteMatcher = dollarQuoteUrlPattern.matcher(searchable);
+        String lastUrl = null;
+        while (dollarQuoteMatcher.find()) {
+            lastUrl = unescapeDollarQuote(dollarQuoteMatcher.group(1));
+        }
+        if (lastUrl != null) {
+            return lastUrl;
+        }
+
+        Pattern quotedUrlPattern = Pattern.compile("['\"](https?://[^'\"]+)['\"]");
+        Matcher quotedMatcher = quotedUrlPattern.matcher(searchable);
+        while (quotedMatcher.find()) {
+            lastUrl = quotedMatcher.group(1);
+        }
+        if (lastUrl != null) {
+            return lastUrl;
+        }
+
+        Pattern unquotedUrlPattern = Pattern.compile("(https?://[^\\s'\"]+)");
+        Matcher unquotedMatcher = unquotedUrlPattern.matcher(searchable);
+        while (unquotedMatcher.find()) {
+            lastUrl = stripTrailingCurlMeta(unquotedMatcher.group(1));
+        }
+        return lastUrl;
+    }
+
+    /**
+     * Replace header/cookie/data argument values with spaces (same length) so embedded URLs
+     * are not selected as the request target.
+     */
+    private static String maskEmbeddedUrlRegions(String curlCommand) {
+        char[] chars = curlCommand.toCharArray();
+        maskFlagValueRegions(chars, curlCommand, Pattern.compile("(?:--header|-H)(?:\\s+|=)"));
+        maskFlagValueRegions(chars, curlCommand, COOKIE_FLAG_PATTERN);
+        maskFlagValueRegions(chars, curlCommand, DATA_FLAG_PATTERN);
+        maskFlagValueRegions(chars, curlCommand, Pattern.compile("(?:--referer|-e)(?:\\s+|=)"));
+        maskFlagValueRegions(chars, curlCommand, Pattern.compile("(?:--user-agent|-A)(?:\\s+|=)"));
+        return new String(chars);
+    }
+
+    private static void maskFlagValueRegions(char[] chars, String source, Pattern flagPattern) {
+        Matcher flagMatcher = flagPattern.matcher(source);
+        while (flagMatcher.find()) {
+            int valueStart = flagMatcher.end();
+            if (valueStart >= source.length()) {
+                continue;
+            }
+            int valueEnd = findTokenEnd(source, valueStart);
+            for (int i = valueStart; i < valueEnd; i++) {
+                chars[i] = ' ';
+            }
+        }
+    }
+
+    /**
+     * Extract all values following a flag pattern (quoted, $'...', or unquoted tokens).
+     */
+    static List<String> extractFlagValues(String command, Pattern flagPattern) {
+        List<String> values = new ArrayList<>();
+        Matcher flagMatcher = flagPattern.matcher(command);
+        while (flagMatcher.find()) {
+            int valueStart = flagMatcher.end();
+            if (valueStart >= command.length()) {
+                continue;
+            }
+            ParsedToken token = parseToken(command, valueStart);
+            if (token != null && token.value != null) {
+                values.add(token.value);
+            }
+        }
+        return values;
+    }
+
+    private static int findTokenEnd(String command, int start) {
+        ParsedToken token = parseToken(command, start);
+        return token == null ? start : token.endIndex;
+    }
+
+    /**
+     * Parse a shell-like token starting at {@code start}: $'...', '...', "...", or bare word.
+     */
+    private static ParsedToken parseToken(String command, int start) {
+        int i = start;
+        while (i < command.length() && Character.isWhitespace(command.charAt(i))) {
+            i++;
+        }
+        if (i >= command.length()) {
             return null;
         }
+
+        // ANSI-C quoted: $'...'
+        if (i + 1 < command.length() && command.charAt(i) == '$' && command.charAt(i + 1) == '\'') {
+            int j = i + 2;
+            StringBuilder sb = new StringBuilder();
+            while (j < command.length()) {
+                char c = command.charAt(j);
+                if (c == '\\' && j + 1 < command.length()) {
+                    sb.append(c).append(command.charAt(j + 1));
+                    j += 2;
+                    continue;
+                }
+                if (c == '\'') {
+                    return new ParsedToken(unescapeDollarQuote(sb.toString()), j + 1);
+                }
+                sb.append(c);
+                j++;
+            }
+            return new ParsedToken(unescapeDollarQuote(sb.toString()), command.length());
+        }
+
+        char quote = command.charAt(i);
+        if (quote == '\'' || quote == '"') {
+            int j = i + 1;
+            StringBuilder sb = new StringBuilder();
+            while (j < command.length()) {
+                char c = command.charAt(j);
+                if (quote == '"' && c == '\\' && j + 1 < command.length()) {
+                    char next = command.charAt(j + 1);
+                    switch (next) {
+                        case '"':
+                        case '\\':
+                        case '\'':
+                            sb.append(next);
+                            break;
+                        case 'n':
+                            sb.append('\n');
+                            break;
+                        case 'r':
+                            sb.append('\r');
+                            break;
+                        case 't':
+                            sb.append('\t');
+                            break;
+                        default:
+                            // Preserve unknown escapes as the escaped char (common for JSON \/)
+                            sb.append(next);
+                            break;
+                    }
+                    j += 2;
+                    continue;
+                }
+                if (c == quote) {
+                    return new ParsedToken(sb.toString(), j + 1);
+                }
+                sb.append(c);
+                j++;
+            }
+            return new ParsedToken(sb.toString(), command.length());
+        }
+
+        // Unquoted token: stop at whitespace
+        int j = i;
+        while (j < command.length() && !Character.isWhitespace(command.charAt(j))) {
+            j++;
+        }
+        String raw = command.substring(i, j);
+        return new ParsedToken(stripTrailingCurlMeta(raw), j);
+    }
+
+    private static String stripTrailingCurlMeta(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        // Trim trailing backslash from line continuations accidentally glued on
+        while (value.endsWith("\\")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        // Trim common trailing punctuation from unquoted URLs
+        while (!value.isEmpty()) {
+            char last = value.charAt(value.length() - 1);
+            if (last == ';' || last == ',' || last == ')' || last == ']') {
+                value = value.substring(0, value.length() - 1);
+            } else {
+                break;
+            }
+        }
+        return value;
+    }
+
+    private static void addHeaderIfAbsent(List<HttpHeader> headers, String headerLine) {
+        int colonIndex = headerLine.indexOf(':');
+        if (colonIndex == -1) {
+            return;
+        }
+        String name = headerLine.substring(0, colonIndex).trim();
+        String value = headerLine.substring(colonIndex + 1).trim();
+        if (name.isEmpty()) {
+            return;
+        }
+        for (HttpHeader existing : headers) {
+            if (existing.name().equalsIgnoreCase(name)) {
+                return;
+            }
+        }
+        headers.add(new HttpHeaderImpl(name, value));
+    }
+
+    private static void addBasicAuthIfAbsent(List<HttpHeader> headers, String userPass) {
+        for (HttpHeader existing : headers) {
+            if (existing.name().equalsIgnoreCase("Authorization")) {
+                return;
+            }
+        }
+        String encoded = Base64.getEncoder().encodeToString(userPass.getBytes(StandardCharsets.UTF_8));
+        headers.add(new HttpHeaderImpl("Authorization", "Basic " + encoded));
+    }
+
+    private static String firstNonNull(String... values) {
+        for (String v : values) {
+            if (v != null) {
+                return v;
+            }
+        }
+        return null;
+    }
+
+    private static String summarizeForLog(String curlCommand) {
+        String oneLine = curlCommand.replaceAll("\\s+", " ").trim();
+        if (oneLine.length() > 120) {
+            return oneLine.substring(0, 117) + "...";
+        }
+        return oneLine;
     }
 
     /**
@@ -166,8 +398,10 @@ public class CurlParser {
      * Handles escape sequences like: \", \\, \', \n, \r, \t, \xHH, etc.
      */
     private static String unescapeDollarQuote(String str) {
-        if (str == null) return null;
-        
+        if (str == null) {
+            return null;
+        }
+
         StringBuilder result = new StringBuilder();
         int i = 0;
         while (i < str.length()) {
@@ -199,7 +433,6 @@ public class CurlParser {
                         i += 2;
                         break;
                     case 'x':
-                        // Handle \xHH (hexadecimal)
                         if (i + 3 < str.length()) {
                             try {
                                 String hex = str.substring(i + 2, i + 4);
@@ -207,7 +440,6 @@ public class CurlParser {
                                 result.append((char) value);
                                 i += 4;
                             } catch (NumberFormatException e) {
-                                // Invalid hex, treat as literal
                                 result.append('\\');
                                 result.append(next);
                                 i += 2;
@@ -219,7 +451,6 @@ public class CurlParser {
                         }
                         break;
                     case 'u':
-                        // Handle Unicode escape sequences (4 hex digits)
                         if (i + 5 < str.length()) {
                             try {
                                 String hex = str.substring(i + 2, i + 6);
@@ -227,7 +458,6 @@ public class CurlParser {
                                 result.append((char) value);
                                 i += 6;
                             } catch (NumberFormatException e) {
-                                // Invalid hex, treat as literal
                                 result.append('\\');
                                 result.append(next);
                                 i += 2;
@@ -239,7 +469,6 @@ public class CurlParser {
                         }
                         break;
                     default:
-                        // Unknown escape sequence, keep as is
                         result.append('\\');
                         result.append(next);
                         i += 2;
@@ -253,27 +482,21 @@ public class CurlParser {
         return result.toString();
     }
 
-    private static String preprocessCookieFlags(String curlCommand) {
-        Pattern dollarPattern = Pattern.compile("-b\\s+\\$'([^']+)'");
-        Matcher dollarMatcher = dollarPattern.matcher(curlCommand);
-        StringBuffer sb = new StringBuffer();
-        while (dollarMatcher.find()) {
-            String cookieValue = unescapeDollarQuote(dollarMatcher.group(1));
-            dollarMatcher.appendReplacement(sb, "-H 'Cookie: " + cookieValue.replace("'", "\\'") + "'");
-        }
-        dollarMatcher.appendTail(sb);
-        curlCommand = sb.toString();
-        
-        curlCommand = curlCommand.replaceAll("(?s)-b\\s+'(.*?)'", "-H 'Cookie: $1'");
-        curlCommand = curlCommand.replaceAll("(?s)-b\\s+\"(.*?)\"", "-H \"Cookie: $1\"");
-        return curlCommand;
-    }
-
     protected static void log(String toLog, MontoyaApi api) {
         if (api != null) {
-
+            api.logging().logToOutput(toLog);
         } else {
             System.out.println(toLog);
+        }
+    }
+
+    private static final class ParsedToken {
+        final String value;
+        final int endIndex;
+
+        ParsedToken(String value, int endIndex) {
+            this.value = value;
+            this.endIndex = endIndex;
         }
     }
 
@@ -301,14 +524,18 @@ public class CurlParser {
         public String getBaseUrl() {
             StringBuilder builder = new StringBuilder();
             builder.append(getProtocol())
-                   .append("://")
-                   .append(getHost());
+                    .append("://")
+                    .append(getHost());
 
-            if (port != -1 && port != 80 && port != 443) builder.append(":").append(getPort());
+            if (port != null && port != -1 && port != 80 && port != 443) {
+                builder.append(":").append(getPort());
+            }
 
             builder.append(getPath());
 
-            if (query != null && !"".equals(query)) builder.append("?").append(query);
+            if (query != null && !query.isEmpty()) {
+                builder.append("?").append(query);
+            }
 
             return builder.toString();
         }
@@ -316,16 +543,19 @@ public class CurlParser {
         public String getMethod() {
             return method;
         }
+
         public String getProtocol() {
             return protocol;
         }
+
         public String getHost() {
             return host;
         }
 
         public String getPath() {
-            if (path == null || "".equals(path)) return "/";
-
+            if (path == null || path.isEmpty()) {
+                return "/";
+            }
             return path;
         }
 
